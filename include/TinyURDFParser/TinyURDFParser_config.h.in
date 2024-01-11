@@ -5,8 +5,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #pragma once
-#include <string>
 
-// clang-format off
-#define TEST_SOURCE_DIR std::string("@CMAKE_CURRENT_SOURCE_DIR@")
-// clang-format on
+#cmakedefine USE_KDL

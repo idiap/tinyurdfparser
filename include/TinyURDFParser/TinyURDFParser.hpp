@@ -1,33 +1,23 @@
-/**
-    A lightweight URDF parser that convert an URDF file into a KDL Tree.
-
-    Copyright (c) 2022 Idiap Research Institute, http://www.idiap.ch/
-    Written by Jeremy Maceiras <jeremy.maceiras@idiap.ch>
-
-    This file is part of TinyURDFParser.
-
-    TinyURDFParser is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 3 as
-    published by the Free Software Foundation.
-
-    TinyURDFParser is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with TinyURDFParser. If not, see <http://www.gnu.org/licenses/>.
-*/
+// SPDX-FileCopyrightText: 2023 Idiap Research Institute <contact@idiap.ch>
+//
+// SPDX-FileContributor: Jeremy Maceiras  <jeremy.maceiras@idiap.ch>
+//
+// SPDX-License-Identifier: GPL-3.0-only
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <vector>
 
 #include <Eigen/Dense>
 
+#include "TinyURDFParser/TinyURDFParser_config.h"  // cppcheck-suppress missingInclude
+
+#ifdef USE_KDL
 #include <kdl/chain.hpp>
 #include <kdl/tree.hpp>
+#endif
 
 namespace tinyxml2 {
 class XMLElement;
@@ -42,31 +32,6 @@ namespace tup {
  */
 class TinyURDFParser {
 public:
-    /**
-     * @brief Construct a new TinyURDF Parser object
-     *
-     * @param filename path to the desired urdf file.
-     */
-    TinyURDFParser(const std::string& filename);
-
-    /**
-     * @brief Create a new kinematic chain between <base> and <tip> links
-     *
-     * @param base name of the base link.
-     * @param tip name of the tip link.
-     * @return true managed to create the kinematic chain.
-     * @return false  did not manage to create the kinematic chain.
-     */
-    bool setKinematicChain(const std::string& base, const std::string& tip);
-
-    /**
-     * @brief Get the Kinematic Chain object
-     *
-     * @return KDL::Chain
-     */
-    KDL::Chain getKinematicChain() { return kinematic_chain_; }
-
-protected:
     struct KinematicElement {
         std::string TAG = "TERMINATION";
 
@@ -76,13 +41,20 @@ protected:
         std::string name;
     };
 
+    struct Geometry {
+        std::string TAG = "UNKNOWN";
+
+        Eigen::Vector3d xyz;
+        Eigen::Vector3d rpy;
+    };
+
     struct Joint : public KinematicElement {
         Joint() {
             TAG = "JOINT";
             axis_raw = "default";
             xyz = Eigen::Vector3d::Zero();
             rpy = Eigen::Vector3d::Zero();
-            axis << 1, 0, 0;
+            axis = Eigen::Vector3d(1, 0, 0);
         }
 
         std::string parent_name;
@@ -102,24 +74,105 @@ protected:
             is_child = false;
         }
 
+        std::vector<Geometry*> primitives;
         bool is_parent;
         bool is_child;
     };
 
-    void printKinematicChain(const KinematicElement* elem, const int& level = 0);
-    Joint parseXMLJoint(const tinyxml2::XMLElement* joint_xml);
-    Segment parseXMLSegment(const tinyxml2::XMLElement* segment_xml);
-    Eigen::Vector3d rawArrayToEigenVector(std::string raw_array);  // Copy is made on purpose
+    struct Box : public Geometry {
+        explicit Box(const Eigen::Vector3d& size) {
+            TAG = "BOX";
+            this->size = size;
+        }
 
-    void buildKDLTree(const KinematicElement* current, const std::string& hook = "NONE");
+        Eigen::Vector3d size;
+    };
+
+    struct Cylinder : public Geometry {
+        Cylinder(const double& radius, const double& length) {
+            TAG = "CYLINDER";
+            this->radius = radius;
+            this->length = length;
+        }
+
+        double radius;
+        double length;
+    };
+
+    struct Sphere : public Geometry {
+        explicit Sphere(const double& radius) {
+            TAG = "SPHERE";
+            this->radius = radius;
+        }
+
+        double radius;
+    };
+
+    /**
+     * @brief Construct a new TinyURDF Parser object
+     *
+     * @param filename path to the desired urdf file.
+     */
+    static TinyURDFParser fromFile(const std::string& filename);
+
+    /**
+     * @brief Construct a new TinyURDF Parser object
+     *
+     * @param filename URDF file's content.
+     */
+    explicit TinyURDFParser(const std::string& urdf);
+
+    ~TinyURDFParser();
+
+#ifdef USE_KDL
+
+    /**
+     * @brief Create a new kinematic chain between <base> and <tip> links
+     *
+     * @param base name of the base link.
+     * @param tip name of the tip link.
+     * @return true managed to create the kinematic chain.
+     * @return false  did not manage to create the kinematic chain.
+     */
+    bool setKinematicChain(const std::string& base, const std::string& tip);
+
+    /**
+     * @brief Get the Kinematic Chain object
+     *
+     * @return KDL::Chain
+     */
+    KDL::Chain getKinematicChain() {
+        return kinematic_chain_;
+    }
+#endif
+
+    const std::map<std::string, Segment>& getLinks() {
+        return links_;
+    }
+    const std::map<std::string, Joint>& getJoints() {
+        return joints_;
+    }
+
+protected:
+    Joint parseXMLJoint(const tinyxml2::XMLElement* joint_xml);
+    Segment parseXMLSegment(tinyxml2::XMLElement* segment_xml);
+    Eigen::Vector3d rawArrayToEigenVector(std::string raw_array);  // Copy is made on purpose
 
     Joint start_;
     std::vector<const KinematicElement*> tips_;
 
-    void init(const tinyxml2::XMLDocument& urdf_xml);
+    void init(tinyxml2::XMLDocument& urdf_xml);
+
+#ifdef USE_KDL
     KDL::Chain kinematic_chain_;
     KDL::Tree robot_tree_;
 
     std::map<std::string, KDL::Joint::JointType> urdf_to_kdl_type_;
+
+    void buildKDLTree(const KinematicElement* current, const std::string& hook = "NONE");
+#endif
+
+    std::map<std::string, Joint> joints_;
+    std::map<std::string, Segment> links_;
 };
 }  // namespace tup

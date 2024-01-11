@@ -1,100 +1,113 @@
-/**
-    A lightweight URDF parser that convert an URDF file into a KDL Tree.
-
-    Copyright (c) 2022 Idiap Research Institute, http://www.idiap.ch/
-    Written by Jeremy Maceiras <jeremy.maceiras@idiap.ch>
-
-    This file is part of TinyURDFParser.
-
-    TinyURDFParser is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 3 as
-    published by the Free Software Foundation.
-
-    TinyURDFParser is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with TinyURDFParser. If not, see <http://www.gnu.org/licenses/>.
-*/
+// SPDX-FileCopyrightText: 2023 Idiap Research Institute <contact@idiap.ch>
+//
+// SPDX-FileContributor: Jeremy Maceiras  <jeremy.maceiras@idiap.ch>
+//
+// SPDX-License-Identifier: GPL-3.0-only
 
 #include <tinyxml2/tinyxml2.h>
 #include <map>
 
 #include <TinyURDFParser/TinyURDFParser.hpp>
+
+#ifdef USE_KDL
 #include <kdl/joint.hpp>
 #include <kdl/segment.hpp>
+#endif
 
+#include <algorithm>
+#include <fstream>
 #include <iostream>
 
 namespace tup {
 
-TinyURDFParser::TinyURDFParser(const std::string& filename) {
+TinyURDFParser TinyURDFParser::fromFile(const std::string& filename) {
+    std::ifstream f(filename.c_str());
+    std::stringstream buffer;
+
+    buffer << f.rdbuf();
+
+    TinyURDFParser parser(buffer.str());
+
+    f.close();
+    return parser;
+}
+
+TinyURDFParser::TinyURDFParser(const std::string& urdf) {
     tinyxml2::XMLDocument urdf_xml;
-    if (urdf_xml.LoadFile(filename.c_str()) != tinyxml2::XML_SUCCESS) {
+    if (urdf_xml.Parse(urdf.c_str()) != tinyxml2::XML_SUCCESS) {
         throw std::runtime_error("Unable to open urdf file");
     }
 
+#ifdef USE_KDL
     // Build Translator for URDF Axis to KDL Axis
     urdf_to_kdl_type_["prismatic"] = KDL::Joint::JointType::TransAxis;
     urdf_to_kdl_type_["revolute"] = KDL::Joint::JointType::RotAxis;
     urdf_to_kdl_type_["fixed"] = KDL::Joint::JointType::None;
     urdf_to_kdl_type_["continuous"] = urdf_to_kdl_type_["revolute"];
+#endif
 
     start_.name = "joint_root";
 
     init(urdf_xml);
-}  // namespace tup
+}
 
+TinyURDFParser::~TinyURDFParser() {
+    for (auto const& link : links_) {
+        for (auto prim : link.second.primitives) {
+            delete prim;
+        }
+    }
+}
+
+#ifdef USE_KDL
 bool TinyURDFParser::setKinematicChain(const std::string& base, const std::string& tip) {
     return robot_tree_.getChain(base, tip, kinematic_chain_);
 }
+#endif
 
-void TinyURDFParser::init(const tinyxml2::XMLDocument& urdf_xml) {
-    const tinyxml2::XMLElement* root = urdf_xml.RootElement();
+void TinyURDFParser::init(tinyxml2::XMLDocument& urdf_xml) {
+    tinyxml2::XMLElement* root = urdf_xml.RootElement();
 
     if (root != NULL) {
         if (strcmp(root->Name(), "robot") == 0) {
             // Firstly parse all joints and links without connecting them
 
-            std::map<std::string, Joint> joints;
-            std::map<std::string, Segment> links;
-
             for (auto joint = root->FirstChildElement("joint"); joint; joint = joint->NextSiblingElement("joint")) {
-                joints[std::string(joint->Attribute("name"))] = parseXMLJoint(joint);
+                joints_[std::string(joint->Attribute("name"))] = parseXMLJoint(joint);
             }
 
-            for (auto link = root->FirstChildElement("link"); link; link = link->NextSiblingElement("link")) {
-                links[std::string(link->Attribute("name"))] = parseXMLSegment(link);
+            for (tinyxml2::XMLElement* link = root->FirstChildElement("link"); link; link = link->NextSiblingElement("link")) {
+                links_[std::string(link->Attribute("name"))] = parseXMLSegment(link);
             }
 
             // Connect joints and links together
-            if (joints.size() > 0 && links.size() > 0) {
+            if (joints_.size() > 0 && links_.size() > 0) {
                 // Start by writing relation
-                for (auto& [joint_name, joint] : joints) {
-                    links[joint.parent_name].is_parent = true;
-                    links[joint.parent_name].children.push_back(&joint);
+                for (auto& joint : joints_) {
+                    links_[joint.second.parent_name].is_parent = true;
+                    links_[joint.second.parent_name].children.push_back(&joint.second);
 
-                    links[joint.child_name].is_child = true;
-                    links[joint.parent_name].parent = &joint;
+                    links_[joint.second.child_name].is_child = true;
+                    links_[joint.second.parent_name].parent = &joint.second;
 
-                    joint.parent = &links[joint.parent_name];
-                    joint.children.push_back(&links[joint.child_name]);
+                    joint.second.parent = &links_[joint.second.parent_name];
+                    joint.second.children.push_back(&links_[joint.second.child_name]);
                 }
 
                 // Now go through all the segments to find the origin and the end
-                for (auto& [link_name, link] : links) {
-                    if (!link.is_parent && link.is_child) {
-                        tips_.push_back(&link);
+                for (auto& link : links_) {
+                    if (!link.second.is_parent && link.second.is_child) {
+                        tips_.push_back(&link.second);
                     }
-                    if (link.is_parent && !link.is_child) {
-                        start_.children.push_back(&link);
+                    if (link.second.is_parent && !link.second.is_child) {
+                        start_.children.push_back(&link.second);
                     }
                 }
+#ifdef USE_KDL
                 buildKDLTree(&start_, "root");
+#endif
             } else {
-                std::runtime_error("[urdf_parsing] URDF file does not have <joint> or <link> tags");
+                throw std::runtime_error("[urdf_parsing] URDF file does not have <joint> or <link> tags");
             }
 
         } else {
@@ -105,6 +118,7 @@ void TinyURDFParser::init(const tinyxml2::XMLDocument& urdf_xml) {
     }
 }
 
+#ifdef USE_KDL
 void TinyURDFParser::buildKDLTree(const KinematicElement* current, const std::string& hook) {
     std::string new_hook = hook;
     if (current->TAG == "JOINT") {
@@ -136,7 +150,7 @@ void TinyURDFParser::buildKDLTree(const KinematicElement* current, const std::st
 
         KDL::Segment kdl_segment(kdl_segment_name, kdl_joint, kdl_frame);
 
-        bool connected = robot_tree_.addSegment(kdl_segment, hook);
+        robot_tree_.addSegment(kdl_segment, hook);
         new_hook = kdl_segment_name;
     }
 
@@ -144,6 +158,7 @@ void TinyURDFParser::buildKDLTree(const KinematicElement* current, const std::st
         buildKDLTree(child, new_hook);
     }
 }
+#endif
 
 TinyURDFParser::Joint TinyURDFParser::parseXMLJoint(const tinyxml2::XMLElement* joint_xml) {
     TinyURDFParser::Joint joint;
@@ -158,9 +173,12 @@ TinyURDFParser::Joint TinyURDFParser::parseXMLJoint(const tinyxml2::XMLElement* 
     if (joint_xml->Attribute("type") != NULL) {
         joint.type = std::string(joint_xml->Attribute("type"));
 
+#ifdef USE_KDL
         if (urdf_to_kdl_type_.find(joint.type) == urdf_to_kdl_type_.end()) {
             throw std::runtime_error("[urdf_parsing] Unknown joint type \"" + joint.type + "\"");
         }
+#endif
+
     } else {
         throw std::runtime_error("[urdf_parsing] Mandatory attribute \"type\" is missing for joint " + joint.name);
     }
@@ -198,31 +216,79 @@ TinyURDFParser::Joint TinyURDFParser::parseXMLJoint(const tinyxml2::XMLElement* 
 
     return joint;
 }
-TinyURDFParser::Segment TinyURDFParser::parseXMLSegment(const tinyxml2::XMLElement* segment_xml) {
+
+TinyURDFParser::Segment TinyURDFParser::parseXMLSegment(tinyxml2::XMLElement* segment_xml) {
     TinyURDFParser::Segment segment;
     segment.name = std::string(segment_xml->Attribute("name"));
+
+    for (tinyxml2::XMLElement* collision_elem = segment_xml->FirstChildElement("collision"); collision_elem != NULL; collision_elem = collision_elem->NextSiblingElement()) {
+        Eigen::Vector3d rpy, xyz;
+
+        if (collision_elem->FirstChildElement("origin") == NULL || collision_elem->FirstChildElement("geometry") == NULL) {
+            continue;
+        }
+
+        if (collision_elem->FirstChildElement("origin")->Attribute("rpy") != NULL) {
+            std::string rpy_raw = std::string(collision_elem->FirstChildElement("origin")->Attribute("rpy"));
+            rpy = rawArrayToEigenVector(rpy_raw);
+        }
+
+        if (collision_elem->FirstChildElement("origin")->Attribute("xyz") != NULL) {
+            std::string xyz_raw = std::string(collision_elem->FirstChildElement("origin")->Attribute("xyz"));
+            xyz = rawArrayToEigenVector(xyz_raw);
+        }
+
+        if (collision_elem->FirstChildElement("geometry")->NoChildren()) {
+            continue;
+        }
+
+        std::string type = collision_elem->FirstChildElement("geometry")->FirstChild()->Value();
+
+        TinyURDFParser::Geometry* obj;
+
+        if (type == "box") {
+            obj = new TinyURDFParser::Box(rawArrayToEigenVector(std::string(collision_elem->FirstChildElement("geometry")->FirstChildElement()->Attribute("size"))));
+        } else if (type == "cylinder") {
+            double radius = std::stod(collision_elem->FirstChildElement("geometry")->FirstChildElement()->Attribute("radius"));
+            double length = std::stod(collision_elem->FirstChildElement("geometry")->FirstChildElement()->Attribute("length"));
+            obj = new TinyURDFParser::Cylinder(radius, length);
+        } else if (type == "sphere") {
+            double radius = std::stod(collision_elem->FirstChildElement("geometry")->FirstChildElement()->Attribute("radius"));
+            obj = new TinyURDFParser::Sphere(radius);
+        } else {
+            continue;
+        }
+
+        obj->rpy = rpy;
+        obj->xyz = xyz;
+        segment.primitives.push_back(obj);
+    }
 
     return segment;
 }
 
 Eigen::Vector3d TinyURDFParser::rawArrayToEigenVector(std::string raw_array) {
+    // Trim from end
+    raw_array.erase(std::find_if(raw_array.rbegin(), raw_array.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), raw_array.end());
+
     const std::string delimiter = " ";
     Eigen::Vector3d array;
 
     size_t index = 0;
-    size_t pos = 0;
     std::string token;
     while (true) {
-        pos = raw_array.find(delimiter);
+        size_t pos = raw_array.find(delimiter);
 
         if (index > 2) {
             throw std::runtime_error("[urdf_parsing] Expected a 3d array got more, check arrays format.");
         }
 
-        token = raw_array.substr(0, pos);
+        if (pos > 0) {
+            token = raw_array.substr(0, pos);
 
-        array(index) = std::stod(token);
-        index++;
+            array[index] = std::stod(token);
+            index++;
+        }
 
         if (pos == std::string::npos) {
             break;
@@ -236,31 +302,4 @@ Eigen::Vector3d TinyURDFParser::rawArrayToEigenVector(std::string raw_array) {
 
     return array;
 }
-
-void TinyURDFParser::printKinematicChain(const TinyURDFParser::KinematicElement* elem, const int& level) {
-    std::string spacing = "";
-    for (int i = 0; i <= level; i++) {
-        spacing += "  ";
-    }
-
-    std::cout << spacing << "TAG: " << elem->TAG << std::endl;
-
-    if (elem->TAG == "JOINT") {
-        const Joint* joint = static_cast<const Joint*>(elem);
-        std::cout << spacing << "Name: " << joint->name << std::endl;
-        std::cout << spacing << "Type: " << joint->type << std::endl;
-        std::cout << spacing << "xyz: " << joint->xyz << std::endl;
-        std::cout << spacing << "rpy: " << joint->rpy << std::endl;
-        std::cout << spacing << "axis: " << joint->axis << std::endl;
-    } else if (elem->TAG == "SEGMENT") {
-        const Segment* link = static_cast<const Segment*>(elem);
-        std::cout << spacing << "Name: " << link->name << std::endl;
-    }
-
-    int next_level = level + 1;
-    for (auto child : elem->children) {
-        printKinematicChain(child, next_level);
-    }
-}
-
 }  // namespace tup

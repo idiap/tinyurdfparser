@@ -318,7 +318,7 @@
   <joint name="panda_tip_joint" type="fixed">
     <parent link="panda_hand" />
     <child link="panda_tip" />
-    <origin rpy="0 0 0" xyz="0 0 0.1034"/> 
+    <origin rpy="0 0 0" xyz="0 0 0.1034"/>
     <axis xyz="0 0 1"/>
   </joint>
 
@@ -365,7 +365,7 @@
       </geometry>
     </collision>
   </link>
-  
+
   <link name="panda_tip">
     <inertial>
         <mass value="1"/>
